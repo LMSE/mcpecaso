@@ -24,20 +24,9 @@ def batch_end_titer(dfba_data, time, settings):
     return dfba_data[2, -1]
 
 
-def dupont_metric(dfba_data, time, settings):
-    """ This function returns the approximate dupont metric of a batch.
-        Input dfba_data should be in the order [biomass, substrate, product]"""
-    yd = batch_yield(dfba_data, time, settings)
-    if yd > 0:
-        return batch_productivity(dfba_data, time, settings)*(1-1/yd)
-    else:
-        return 0
-
-
 def linear_combination(dfba_data, time, settings):
     """ This function returns a linear combination of the above defined metrics in case it is needed as an
         objective function. Input dfba_data should be in the order [biomass, substrate, product]"""
     return settings.productivity_coefficient*batch_productivity(dfba_data, time, settings) + \
         settings.yield_coefficient*batch_yield(dfba_data, time, settings) + \
-        settings.titer_coefficient*batch_end_titer(dfba_data, time, settings) + \
-        settings.dupont_metric_coefficient*dupont_metric(dfba_data, time, settings)
+        settings.titer_coefficient*batch_end_titer(dfba_data, time, settings)

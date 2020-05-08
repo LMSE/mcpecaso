@@ -1,7 +1,7 @@
 class Settings:
     def __init__(self):
-        self.k_m = 0
-        self.substrate_uptake = 'generalized_logistic'
+        self.uptake_fun = 'logistic'
+        self.uptake_params = {'B':5}
         self.parallel = False
         self.num_points = 25
         self.objective = 'batch_productivity'
@@ -12,9 +12,11 @@ class Settings:
         self.productivity_coefficient = 0
         self.yield_coefficient = 0
         self.titer_coefficient = 0
-        self.dupont_metric_coefficient = 0
         self.num_timepoints = 1000
-        self.substrate_uptake_start = 0.5
+        self.productivity_constraint = 0
+        self.yield_constraint = 0
+        self.titer_constraint = 0
+        self.scope = 'global'
 
 
 settings = Settings()

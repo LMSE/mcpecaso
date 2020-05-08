@@ -7,6 +7,7 @@ import multiprocessing
 import time
 import warnings
 from .settings import settings
+from copy import deepcopy
 
 
 class TSDyssco(object):
@@ -19,49 +20,28 @@ class TSDyssco(object):
         self.condition = 'None'
         self.production_envelope = None
         self.model_complete_flag = False
-        self.k_m = None
         self.two_stage_fermentation_list = []
         self.one_stage_fermentation_list = []
         self.two_stage_suboptimal_batch = None
         self.two_stage_best_batch = None
         self.one_stage_best_batch = None
+        self.settings = deepcopy(settings)
+        self.one_stage_constraint_flag = True
+        self.two_stage_constraint_flag = True
+        self.objective_name = ''
         self.two_stage_characteristics = {'stage_one_growth_rate': [],
                                           'stage_two_growth_rate': [],
                                           'productivity': [],
                                           'yield': [],
                                           'titer': [],
-                                          'dupont metric': [],
                                           'objective value': []}
         self.one_stage_characteristics = {'growth_rate': [],
                                           'productivity': [],
                                           'yield': [],
                                           'titer': [],
-                                          'dupont metric': [],
                                           'objective value': []}
+        self.continuous_flag = False
 
-        objective_name = ''
-        if settings.productivity_coefficient:
-            objective_name += str(settings.productivity_coefficient) + ' * productivity + '
-        if settings.yield_coefficient:
-            objective_name += str(settings.yield_coefficient) + ' * yield + '
-        if settings.titer_coefficient:
-            objective_name += str(settings.titer_coefficient) + ' * titer + '
-        if settings.dupont_metric_coefficient:
-            objective_name += str(settings.dupont_metric_coefficient) + ' * dupont metric + '
-        objective_name = objective_name.rstrip(" + ")
-
-        objective_dict = {'batch_productivity': 'productivity',
-                          'batch_yield': 'yield',
-                          'batch_titer': 'titer',
-                          'dupont_metric': 'dupont metric',
-                          'linear_combination': objective_name}
-
-
-        try:
-            self.objective_name = objective_dict[settings.objective]
-        except KeyError:
-            warnings.warn("Please check your objective. The objective provided in the settings class isn't valid.")
-            self.objective_name = objective_dict['batch_productivity']
         for key in kwargs:
 
             if key in ['model', 'biomass_rxn', 'substrate_rxn', 'target_rxn', 'condition']:
@@ -100,74 +80,149 @@ class TSDyssco(object):
     def calculate_production_envelope(self):
         self.check_model_complete()
         if self.model_complete_flag:
-            self.k_m = settings.k_m
             self.production_envelope = pd.DataFrame(envelope_calculator(self.model, self.biomass_rxn,
                                                                         self.substrate_rxn, self.target_rxn,
-                                                                        settings.k_m, settings.num_points))
+                                                                        self.settings))
         else:
             warnings.warn("The production envelope could not be generated.")
 
     def add_two_stage_fermentation(self, two_stage_fermentation):
         self.two_stage_fermentation_list.append(two_stage_fermentation)
-        self.two_stage_characteristics['stage_one_growth_rate'].append(two_stage_fermentation.stage_one_fluxes[0])
-        self.two_stage_characteristics['stage_two_growth_rate'].append(two_stage_fermentation.stage_two_fluxes[0])
+        if self.settings.scope == 'global':
+            self.two_stage_characteristics['stage_one_growth_rate'].append(two_stage_fermentation.stage_one_fluxes[0])
+            self.two_stage_characteristics['stage_two_growth_rate'].append(two_stage_fermentation.stage_two_fluxes[0])
+
+        elif self.settings.scope == 'extrema':
+            self.two_stage_characteristics['stage_one_growth_rate'].append(two_stage_fermentation.stage_one_factor *
+                                                                           max(self.production_envelope.growth_rates))
+            self.two_stage_characteristics['stage_two_growth_rate'].append(two_stage_fermentation.stage_two_factor *
+                                                                           max(self.production_envelope.growth_rates))
+
+        else:
+            raise Exception('Unknown Scope')
+
         self.two_stage_characteristics['productivity'].append(two_stage_fermentation.batch_productivity)
         self.two_stage_characteristics['yield'].append(two_stage_fermentation.batch_yield)
         self.two_stage_characteristics['titer'].append(two_stage_fermentation.batch_titer)
-        self.two_stage_characteristics['dupont metric'].append(two_stage_fermentation.dupont_metric)
         self.two_stage_characteristics['objective value'].append(two_stage_fermentation.objective_value)
-        if (two_stage_fermentation.stage_one_fluxes[0] == max(self.production_envelope['growth_rates']) and
-           two_stage_fermentation.stage_two_fluxes[0] == min(self.production_envelope['growth_rates'])):
-            self.two_stage_suboptimal_batch = two_stage_fermentation
-        if self.two_stage_best_batch is not None:
-            if two_stage_fermentation.objective_value > self.two_stage_best_batch.objective_value:
-                self.two_stage_best_batch = two_stage_fermentation
+
+        if not two_stage_fermentation.constraint_flag:
+            self.two_stage_constraint_flag = False
+            warnings.warn("The constraints set for the fermentation metrics could not be met for one or more one stage "
+                          "fermentation batches. These batches were not considered while determining the best batch. "
+                          "Consider reducing or removing the constraints to resolve this issue.")
         else:
-            self.two_stage_best_batch = two_stage_fermentation
+            if self.settings.scope == 'global':
+                if (two_stage_fermentation.stage_one_fluxes[0] == max(self.production_envelope['growth_rates']) and
+                   two_stage_fermentation.stage_two_fluxes[0] == min(self.production_envelope['growth_rates'])):
+                    self.two_stage_suboptimal_batch = two_stage_fermentation
+                if self.two_stage_best_batch is not None:
+                    if two_stage_fermentation.objective_value > self.two_stage_best_batch.objective_value:
+                        if two_stage_fermentation.stage_one_fluxes != two_stage_fermentation.stage_two_fluxes:
+                            self.two_stage_best_batch = two_stage_fermentation
+                else:
+                    if two_stage_fermentation.stage_one_fluxes != two_stage_fermentation.stage_two_fluxes:
+                        self.two_stage_best_batch = two_stage_fermentation
+            elif self.settings.scope =='extrema':
+                if two_stage_fermentation.extrema_type == 'ts_sub':
+                    self.two_stage_suboptimal_batch = two_stage_fermentation
+                if two_stage_fermentation.extrema_type == 'ts_best':
+                    self.two_stage_best_batch = two_stage_fermentation
+            else:
+                raise Exception('Unknown Scope')
 
     def add_one_stage_fermentation(self, one_stage_fermentation):
         self.one_stage_fermentation_list.append(one_stage_fermentation)
-        self.one_stage_characteristics['growth_rate'].append(one_stage_fermentation.fluxes[0])
+        if self.settings.scope == 'global':
+            self.one_stage_characteristics['growth_rate'].append(one_stage_fermentation.fluxes[0])
+        elif self.settings.scope == 'extrema':
+            self.one_stage_characteristics['growth_rate'].append(one_stage_fermentation.stage_one_factor *
+                                                                 max(self.production_envelope.growth_rates))
         self.one_stage_characteristics['productivity'].append(one_stage_fermentation.batch_productivity)
         self.one_stage_characteristics['yield'].append(one_stage_fermentation.batch_yield)
         self.one_stage_characteristics['titer'].append(one_stage_fermentation.batch_titer)
-        self.one_stage_characteristics['dupont metric'].append(one_stage_fermentation.dupont_metric)
         self.one_stage_characteristics['objective value'].append(one_stage_fermentation.objective_value)
-        if self.one_stage_best_batch is not None:
-            if one_stage_fermentation.objective_value > self.one_stage_best_batch.objective_value:
-                self.one_stage_best_batch = one_stage_fermentation
+        if not one_stage_fermentation.constraint_flag:
+            self.one_stage_constraint_flag = False
+            warnings.warn("The constraints set for the fermentation metrics could not be met for one or more one stage "
+                          "fermentation batches. These batches were not considered while determining the best batch. "
+                          "Consider reducing or removing the constraints to resolve this issue.")
         else:
-            self.one_stage_best_batch = one_stage_fermentation
+            if self.one_stage_best_batch is not None:
+                if one_stage_fermentation.objective_value > self.one_stage_best_batch.objective_value:
+                    self.one_stage_best_batch = one_stage_fermentation
+            else:
+                self.one_stage_best_batch = one_stage_fermentation
 
     def calculate_fermentation_characteristics(self):
         if self.production_envelope is None:
             self.calculate_production_envelope()
+
+        objective_name = ''
+        if self.settings.productivity_coefficient:
+            objective_name += str(self.settings.productivity_coefficient) + ' * productivity + '
+        if self.settings.yield_coefficient:
+            objective_name += str(self.settings.yield_coefficient) + ' * yield + '
+        if self.settings.titer_coefficient:
+            objective_name += str(self.settings.titer_coefficient) + ' * titer + '
+        objective_name = objective_name.rstrip(" + ")
+        objective_dict = {'batch_productivity': 'productivity',
+                          'batch_yield': 'yield',
+                          'batch_titer': 'titer',
+                          'linear_combination': objective_name}
+        try:
+            self.objective_name = objective_dict[self.settings.objective]
+        except KeyError:
+            warnings.warn("Please check your objective. The objective provided in the settings class isn't valid.")
+            self.objective_name = objective_dict['batch_productivity']
+
         if self.production_envelope is not None:
+            self.two_stage_fermentation_list = []
+            self.one_stage_fermentation_list = []
+            self.two_stage_suboptimal_batch = None
+            self.two_stage_best_batch = None
+            self.one_stage_best_batch = None
             envelope = self.production_envelope
             flux_list = [list(envelope[['growth_rates', 'substrate_uptake_rates', 'production_rates_ub']].iloc[i])
                          for i in range(len(envelope))]
             for i in range(len(flux_list)):
                 flux_list[i][1] = -flux_list[i][1]
-            if settings.parallel:
-                print('Starting parallel pool')
-                num_cores = multiprocessing.cpu_count()
+            if self.settings.scope == 'global':
+                if self.settings.parallel:
+                    print('Starting parallel pool')
+                    num_cores = multiprocessing.cpu_count()
+                    start_time = time.time()
+                    os_ferm_list = Parallel(n_jobs=num_cores, verbose=5)(
+                        delayed(OneStageFermentation)(flux_list[index], self.settings)
+                        for index in range(len(flux_list)))
+                    ts_ferm_list = Parallel(n_jobs=num_cores, verbose=5)(
+                        delayed(TwoStageFermentation)(flux_list[stage_one_index], flux_list[stage_two_index], self.settings)
+                        for stage_one_index in range(len(flux_list))
+                        for stage_two_index in range(len(flux_list)))
+                    end_time = time.time()
+                else:
+                    start_time = time.time()
+                    os_ferm_list = [OneStageFermentation(flux_list[index], self.settings)
+                                    for index in range(len(flux_list))]
+                    ts_ferm_list = [TwoStageFermentation(flux_list[stage_one_index], flux_list[stage_two_index], self.settings)
+                                    for stage_one_index in range(len(flux_list))
+                                    for stage_two_index in range(len(flux_list))]
+                    end_time = time.time()
+            elif self.settings.scope == 'extrema':
                 start_time = time.time()
-                os_ferm_list = Parallel(n_jobs=num_cores, verbose=5)(
-                    delayed(OneStageFermentation)(flux_list[index], settings)
-                    for index in range(len(flux_list)))
-                ts_ferm_list = Parallel(n_jobs=num_cores, verbose=5)(
-                    delayed(TwoStageFermentation)(flux_list[stage_one_index], flux_list[stage_two_index], settings)
-                    for stage_one_index in range(len(flux_list))
-                    for stage_two_index in range(len(flux_list)))
+                max_growth = max(self.production_envelope.growth_rates)
+                ts_ferm_list = []
+                os_ferm_list = []
+                ts_ferm_list.append(FermentationExtrema(self.model, max_growth, self.biomass_rxn, self.substrate_rxn,
+                                                        self.target_rxn, self.settings, 'ts_best'))
+                ts_ferm_list.append(FermentationExtrema(self.model, max_growth, self.biomass_rxn, self.substrate_rxn,
+                                                        self.target_rxn, self.settings, 'ts_sub'))
+                os_ferm_list.append(FermentationExtrema(self.model, max_growth, self.biomass_rxn, self.substrate_rxn,
+                                                        self.target_rxn, self.settings, 'os_best'))
                 end_time = time.time()
             else:
-                start_time = time.time()
-                os_ferm_list = [OneStageFermentation(flux_list[index], settings)
-                                for index in range(len(flux_list))]
-                ts_ferm_list = [TwoStageFermentation(flux_list[stage_one_index], flux_list[stage_two_index], settings)
-                                for stage_one_index in range(len(flux_list))
-                                for stage_two_index in range(len(flux_list))]
-                end_time = time.time()
+                raise Exception('Unknown Scope')
+
             time.sleep(0.5)
             print("Completed analysis in ", str(end_time-start_time), "s")
             for ts_ferm in ts_ferm_list:
